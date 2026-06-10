@@ -4,12 +4,19 @@ from ultralytics import YOLO
 _MODEL = None
 _DEVICE = None
 
+HARDCODED_WEIGHTS_PATH = (
+    "/root/ros2_ws/src/hazmat_vision/hazmat_vision/hazmatstuff/best.pt"
+)
 
-def init_inference(weights_path="/home/student/documents/rmrc_hazmat/yoloversion/best.pt", device_str="cpu"):
+
+def init_inference(device_str="cpu"):
     global _MODEL, _DEVICE
 
     _DEVICE = device_str
-    _MODEL = YOLO(weights_path)
+
+    print(f"LOADING YOLO MODEL FROM: {HARDCODED_WEIGHTS_PATH}")
+
+    _MODEL = YOLO(HARDCODED_WEIGHTS_PATH)
 
 
 def run_frame(frame, confidence_threshold=0.4):
@@ -23,12 +30,12 @@ def run_frame(frame, confidence_threshold=0.4):
         source=frame,
         conf=confidence_threshold,
         device=_DEVICE,
-        verbose=False
+        verbose=False,
     )
 
     result = results[0]
 
-    if result.boxes is None:
+    if result.boxes is None or len(result.boxes) == 0:
         return annotated_frame, detected_labels
 
     names = result.names
@@ -47,7 +54,7 @@ def run_frame(frame, confidence_threshold=0.4):
             (x1, y1),
             (x2, y2),
             (0, 255, 0),
-            3
+            3,
         )
 
         label_text = f"{label} {conf:.2f}"
@@ -59,7 +66,7 @@ def run_frame(frame, confidence_threshold=0.4):
             cv2.FONT_HERSHEY_SIMPLEX,
             0.8,
             (0, 255, 0),
-            2
+            2,
         )
 
     return annotated_frame, detected_labels
