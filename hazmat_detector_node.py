@@ -1,72 +1,116 @@
 import cv2
-from ultralytics import YOLO
+import rclpy
+from rclpy.node import Node
 
-_MODEL = None
-_DEVICE = None
+from sensor_msgs.msg import Image
+from std_msgs.msg import String
+from cv_bridge import CvBridge
 
-HARDCODED_WEIGHTS_PATH = (
-    "/root/ros2_ws/src/hazmat_vision/hazmat_vision/hazmatstuff/best.pt"
-)
-
-
-def init_inference(device_str="cpu"):
-    global _MODEL, _DEVICE
-
-    _DEVICE = device_str
-
-    print(f"LOADING YOLO MODEL FROM: {HARDCODED_WEIGHTS_PATH}")
-
-    _MODEL = YOLO(HARDCODED_WEIGHTS_PATH)
+from hazmat_vision.hazmat_inference import init_inference, run_frame
 
 
-def run_frame(frame, confidence_threshold=0.4):
-    if _MODEL is None:
-        raise RuntimeError("Inference not initialized. Call init_inference() first.")
+class HazmatCameraNode(Node):
+    def __init__(self):
+        super().__init__('hazmat_ros_node')
 
-    annotated_frame = frame.copy()
-    detected_labels = []
+        self.declare_parameter('camera_id', 0)
+        self.declare_parameter('confidence_threshold', 0.4)
+        self.declare_parameter(
+            'weights_path',
+            '/home/student/hazmat_model/best.pt'
+        )
+        self.declare_parameter('device', 'cpu')
 
-    results = _MODEL.predict(
-        source=frame,
-        conf=confidence_threshold,
-        device=_DEVICE,
-        verbose=False,
-    )
+        self.camera_id = int(self.get_parameter('camera_id').value)
+        self.conf_th = float(self.get_parameter('confidence_threshold').value)
+        weights_path = self.get_parameter('weights_path').value
+        device = self.get_parameter('device').value
 
-    result = results[0]
+        self.camera_topic = f'/cameras/raw/camera_{self.camera_id}'
+        self.annotated_topic = f'/hazmat/annotated/camera_{self.camera_id}'
+        self.labels_topic = f'/hazmat/labels/camera_{self.camera_id}'
 
-    if result.boxes is None or len(result.boxes) == 0:
-        return annotated_frame, detected_labels
+        self.get_logger().info(f'Subscribing to: {self.camera_topic}')
+        self.get_logger().info(f'Publishing annotated images to: {self.annotated_topic}')
+        self.get_logger().info(f'Publishing labels to: {self.labels_topic}')
+        self.get_logger().info(f'Loading YOLO model from: {weights_path}')
 
-    names = result.names
+        init_inference(device_str=device)
 
-    for box in result.boxes:
-        cls_id = int(box.cls[0])
-        conf = float(box.conf[0])
-        label = names[cls_id]
+        self.get_logger().info('YOLO inference initialized')
 
-        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
+        self.bridge = CvBridge()
 
-        detected_labels.append(label)
-
-        cv2.rectangle(
-            annotated_frame,
-            (x1, y1),
-            (x2, y2),
-            (0, 255, 0),
-            3,
+        self.image_sub = self.create_subscription(
+            Image,
+            self.camera_topic,
+            self.image_callback,
+            10
         )
 
-        label_text = f"{label} {conf:.2f}"
-
-        cv2.putText(
-            annotated_frame,
-            label_text,
-            (x1, max(y1 - 10, 20)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.8,
-            (0, 255, 0),
-            2,
+        self.annot_pub = self.create_publisher(
+            Image,
+            self.annotated_topic,
+            10
         )
 
-    return annotated_frame, detected_labels
+        self.labels_pub = self.create_publisher(
+            String,
+            self.labels_topic,
+            10
+        )
+
+        self.get_logger().info('Hazmat detector node ready')
+
+    def image_callback(self, msg):
+        try:
+            frame = self.bridge.imgmsg_to_cv2(
+                msg,
+                desired_encoding='bgr8'
+            )
+        except Exception as e:
+            self.get_logger().error(f'Failed to convert ROS image to OpenCV: {e}')
+            return
+
+        try:
+            annotated_frame, labels = run_frame(
+                frame,
+                confidence_threshold=self.conf_th
+            )
+        except Exception as e:
+            self.get_logger().error(f'Hazmat inference failed: {e}')
+            annotated_frame = frame.copy()
+            labels = []
+
+        try:
+            annotated_msg = self.bridge.cv2_to_imgmsg(
+                annotated_frame,
+                encoding='bgr8'
+            )
+            annotated_msg.header = msg.header
+            self.annot_pub.publish(annotated_msg)
+        except Exception as e:
+            self.get_logger().error(f'Failed to publish annotated image: {e}')
+
+        label_text = ','.join(labels) if labels else 'none'
+        self.labels_pub.publish(String(data=label_text))
+
+        if labels:
+            self.get_logger().info(f'Detected: {labels}')
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = HazmatCameraNode()
+
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+
+    node.destroy_node()
+    rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
